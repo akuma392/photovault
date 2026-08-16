@@ -1,9 +1,10 @@
+// src/pages/Profile.js
 import React, { useState, useEffect } from "react";
 import { useApp } from "../context/AppContext";
 import { authService, mediaService } from "../services/backend";
 import { useToast } from "../context/ToastContext";
 import { MediaCard } from "../components/MediaCard";
-import { User, Lock, Upload, ShieldAlert, Sparkles } from "lucide-react";
+import { User, Lock, Upload, ShieldAlert, Sparkles, CheckCircle2, AlertTriangle, Send, KeyRound } from "lucide-react";
 
 export const Profile = () => {
     const { user, checkUser } = useApp();
@@ -19,6 +20,11 @@ export const Profile = () => {
     const [anonEmail, setAnonEmail] = useState("");
     const [anonPassword, setAnonPassword] = useState("");
     const [anonName, setAnonName] = useState("");
+
+    // Verification states
+    const [sendingVerification, setSendingVerification] = useState(false);
+    const [verificationSecret, setVerificationSecret] = useState("");
+    const [verifyingCode, setVerifyingCode] = useState(false);
 
     const [savingName, setSavingName] = useState(false);
     const [savingPass, setSavingPass] = useState(false);
@@ -37,6 +43,39 @@ export const Profile = () => {
     if (!user) {
         return <div className="p-8 text-center text-slate-500">Please login to view profile.</div>;
     }
+
+    // Send Verification Email
+    const handleSendVerification = async () => {
+        setSendingVerification(true);
+        try {
+            await authService.sendEmailVerification();
+            showToast("Verification email sent! Check your inbox for the link or secret code.", "info");
+        } catch (err) {
+            showToast(err.message || "Failed to send verification email.", "error");
+        } finally {
+            setSendingVerification(false);
+        }
+    };
+
+    // Confirm Verification Secret/Code
+    const handleVerifySecret = async (e) => {
+        e.preventDefault();
+        if (!verificationSecret.trim()) {
+            showToast("Please enter the verification code or secret from your email.", "error");
+            return;
+        }
+        setVerifyingCode(true);
+        try {
+            await authService.confirmEmailVerification(user.$id, verificationSecret.trim());
+            await checkUser();
+            showToast("Email verified successfully! You can now upload, favorite, and download media.", "success");
+            setVerificationSecret("");
+        } catch (err) {
+            showToast(err.message || "Verification code is invalid or expired.", "error");
+        } finally {
+            setVerifyingCode(false);
+        }
+    };
 
     const handleNameUpdate = async (e) => {
         e.preventDefault();
@@ -139,6 +178,25 @@ export const Profile = () => {
                                 Guest
                             </span>
                         )}
+                        {/* Email Verification Badge */}
+                        {!user.isAnonymous && (
+                            <span
+                                className={`text-xs px-2.5 py-0.5 rounded-full font-semibold flex items-center gap-1 ${user.emailVerification
+                                        ? "bg-emerald-50 text-emerald-700 dark:bg-emerald-950 dark:text-emerald-300"
+                                        : "bg-rose-50 text-rose-700 dark:bg-rose-950 dark:text-rose-300"
+                                    }`}
+                            >
+                                {user.emailVerification ? (
+                                    <>
+                                        <CheckCircle2 size={12} /> Verified
+                                    </>
+                                ) : (
+                                    <>
+                                        <AlertTriangle size={12} /> Unverified
+                                    </>
+                                )}
+                            </span>
+                        )}
                     </div>
                     <p className="text-sm text-slate-500">{user.email || "No email linked (Anonymous session)"}</p>
 
@@ -167,6 +225,67 @@ export const Profile = () => {
                     </div>
                 </div>
             </div>
+
+            {/* Email Verification Section */}
+            {!user.isAnonymous && (
+                <div className="bg-white dark:bg-slate-800 p-6 rounded-2xl border border-slate-200 dark:border-slate-700 shadow-sm space-y-4">
+                    <div className="flex items-center justify-between">
+                        <h3 className="font-bold flex items-center gap-2 text-sm">
+                            <KeyRound size={16} className="text-indigo-600" /> Email Verification
+                        </h3>
+                        {user.emailVerification ? (
+                            <span className="text-xs text-emerald-600 font-semibold flex items-center gap-1">
+                                <CheckCircle2 size={14} /> Account Fully Verified
+                            </span>
+                        ) : (
+                            <span className="text-xs text-amber-600 font-semibold flex items-center gap-1">
+                                <AlertTriangle size={14} /> Action Required
+                            </span>
+                        )}
+                    </div>
+
+                    {user.emailVerification ? (
+                        <p className="text-xs text-slate-500">
+                            Your email <strong>{user.email}</strong> is verified. You have full access to uploading, favoriting, and downloading media.
+                        </p>
+                    ) : (
+                        <div className="space-y-4 pt-1">
+                            <p className="text-xs text-slate-500">
+                                Your email is not verified yet. Verification is required to <strong>upload media</strong>, <strong>add favorites</strong>, and <strong>download files</strong>.
+                            </p>
+
+                            <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-3">
+                                <button
+                                    type="button"
+                                    onClick={handleSendVerification}
+                                    disabled={sendingVerification}
+                                    className="flex items-center justify-center gap-1.5 px-4 py-2.5 bg-indigo-50 hover:bg-indigo-100 dark:bg-indigo-950/60 dark:hover:bg-indigo-900/60 text-indigo-700 dark:text-indigo-300 rounded-xl text-xs font-semibold transition disabled:opacity-50"
+                                >
+                                    <Send size={14} /> {sendingVerification ? "Sending..." : "Send Verification Email / Code"}
+                                </button>
+                            </div>
+
+                            {/* Enter Secret/Code Form */}
+                            <form onSubmit={handleVerifySecret} className="flex flex-col sm:flex-row gap-3 pt-2">
+                                <input
+                                    type="text"
+                                    placeholder="Paste verification secret or code from email..."
+                                    value={verificationSecret}
+                                    onChange={(e) => setVerificationSecret(e.target.value)}
+                                    className="flex-1 p-2.5 rounded-xl border border-slate-300 dark:border-slate-600 bg-transparent text-xs focus:ring-2 focus:ring-indigo-500 outline-none"
+                                />
+                                <button
+                                    type="submit"
+                                    disabled={verifyingCode}
+                                    className="px-5 py-2.5 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl text-xs font-semibold transition disabled:opacity-50"
+                                >
+                                    {verifyingCode ? "Verifying..." : "Verify Code"}
+                                </button>
+                            </form>
+                        </div>
+                    )}
+                </div>
+            )}
 
             <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
                 {/* Name Form */}

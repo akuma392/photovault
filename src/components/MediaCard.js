@@ -1,4 +1,3 @@
-// src/components/MediaCard.jsx
 import React, { useState, useEffect } from "react";
 import { Link } from "react-router-dom";
 import { mediaService } from "../services/backend";
@@ -10,12 +9,14 @@ export const MediaCard = ({ item }) => {
     const { user } = useApp();
     const { showToast } = useToast();
     const [isFav, setIsFav] = useState(false);
+    const [favCount, setFavCount] = useState(item.favoritesCount || 0);
 
     useEffect(() => {
+        setFavCount(item.favoritesCount || 0);
         if (user) {
             mediaService.checkIsFavorite(user.$id, item.$id).then(setIsFav);
         }
-    }, [user, item.$id]);
+    }, [user, item]);
 
     const handleFavorite = async (e) => {
         e.preventDefault();
@@ -23,9 +24,21 @@ export const MediaCard = ({ item }) => {
             showToast("Please login to add to favorites!", "error");
             return;
         }
-        const status = await mediaService.toggleFavorite(user.$id, item.$id);
-        setIsFav(status);
-        showToast(status ? "Added to favorites" : "Removed from favorites", "success");
+
+        // Check email verification before allowing favorite
+        if (!user.emailVerification && !user.isAdmin) {
+            showToast("Please verify your email in Profile before adding favorites.", "error");
+            return;
+        }
+
+        try {
+            const { isFavorited, newCount } = await mediaService.toggleFavorite(user.$id, item.$id);
+            setIsFav(isFavorited);
+            setFavCount(newCount);
+            showToast(isFavorited ? "Added to favorites" : "Removed from favorites", "success");
+        } catch (err) {
+            showToast(err.message || "Failed to update favorite", "error");
+        }
     };
 
     const mediaUrl = mediaService.getMediaUrl(item.fileId);
@@ -33,9 +46,8 @@ export const MediaCard = ({ item }) => {
 
     return (
         <div className="group rounded-2xl overflow-hidden bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 flex flex-col shadow-sm hover:shadow-xl hover:-translate-y-1 transition duration-300">
-            {/* Media Display Area with Taller Height & Better Visibility */}
+            {/* Media Display Container */}
             <div className="relative w-full h-72 sm:h-80 bg-slate-950 flex items-center justify-center overflow-hidden">
-                {/* Subtle blurred background for letterboxed media */}
                 {!isVideo && (
                     <img
                         src={mediaUrl}
@@ -61,7 +73,7 @@ export const MediaCard = ({ item }) => {
                     />
                 )}
 
-                {/* Visibility & Type Badges */}
+                {/* Badges */}
                 <div className="absolute top-3 left-3 z-20 flex gap-1.5">
                     <span
                         className={`text-xs px-2.5 py-1 rounded-full font-medium flex items-center gap-1 shadow-md backdrop-blur-md ${item.isPublic
@@ -78,17 +90,18 @@ export const MediaCard = ({ item }) => {
                     </span>
                 </div>
 
-                {/* Favorite Button */}
+                {/* Favorite Button with Live Counter */}
                 <button
                     onClick={handleFavorite}
-                    className="absolute top-3 right-3 z-20 p-2.5 rounded-full bg-black/60 backdrop-blur-md text-white hover:text-rose-500 hover:scale-110 transition shadow-md"
+                    className="absolute top-3 right-3 z-20 flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-black/60 backdrop-blur-md text-white hover:text-rose-500 hover:scale-105 transition shadow-md"
                     aria-label="Favorite"
                 >
-                    <Heart size={18} className={isFav ? "fill-rose-500 text-rose-500" : ""} />
+                    <Heart size={16} className={isFav ? "fill-rose-500 text-rose-500" : ""} />
+                    <span className="text-xs font-semibold">{favCount}</span>
                 </button>
             </div>
 
-            {/* Card Body */}
+            {/* Card Content */}
             <div className="p-5 flex-1 flex flex-col justify-between space-y-4">
                 <div>
                     <p className="text-sm font-medium leading-snug line-clamp-2 text-slate-800 dark:text-slate-200">

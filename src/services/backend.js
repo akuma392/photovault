@@ -1,5 +1,6 @@
 import { Client, Account, Databases, Storage, ID, Query, Permission, Role } from "appwrite";
 
+// Appwrite Client Initialization
 const client = new Client()
     .setEndpoint(process.env.REACT_APP_APPWRITE_ENDPOINT)
     .setProject(process.env.REACT_APP_APPWRITE_PROJECT_ID);
@@ -8,6 +9,7 @@ const account = new Account(client);
 const databases = new Databases(client);
 const storage = new Storage(client);
 
+// Collection & Bucket Constants
 const DB_ID = process.env.REACT_APP_APPWRITE_DATABASE_ID;
 const IMAGES_COLLECTION = process.env.REACT_APP_APPWRITE_IMAGES_COLLECTION_ID;
 const FAVORITES_COLLECTION = process.env.REACT_APP_APPWRITE_FAVORITES_COLLECTION_ID;
@@ -15,15 +17,58 @@ const PROFILES_COLLECTION = "profiles";
 const IMAGES_BUCKET = process.env.REACT_APP_APPWRITE_IMAGES_BUCKET_ID;
 const AVATARS_BUCKET = process.env.REACT_APP_APPWRITE_AVATARS_BUCKET_ID;
 
-// Strict Admin Checker: Only emails containing 'admin1' or 'admin2'
+// Permission Generator Helper
+const userDocPermissions = (userId, isPublic = true) => [
+    Permission.read(isPublic ? Role.any() : Role.user(userId)),
+    Permission.update(Role.user(userId)),
+    Permission.delete(Role.user(userId)),
+];
+
+// Admin Validator
 export const isPermittedAdmin = (email) => {
     if (!email) return false;
-    const lowerEmail = email.toLowerCase();
-    return lowerEmail.includes("admin1") || lowerEmail.includes("admin2");
+    const lower = email.toLowerCase();
+    return lower.includes("admin1") || lower.includes("admin2");
+};
+
+// Profile Lookup / Sync Helper
+const getProfileByUserId = async (userId) => {
+    try {
+        const res = await databases.listDocuments(DB_ID, PROFILES_COLLECTION, [
+            Query.equal("userId", userId),
+            Query.limit(1),
+        ]);
+        return res.documents[0] || null;
+    } catch {
+        return null;
+    }
+};
+
+const syncProfileDoc = async ({ userId, name, email, avatarUrl = "" }) => {
+    const existing = await getProfileByUserId(userId);
+    const data = {
+        userId,
+        name: name || "User",
+        email: email || "",
+        avatarUrl,
+        isAdmin: isPermittedAdmin(email),
+        isBlocked: false,
+    };
+
+    if (existing) {
+        return await databases.updateDocument(DB_ID, PROFILES_COLLECTION, existing.$id, data);
+    }
+    return await databases.createDocument(
+        DB_ID,
+        PROFILES_COLLECTION,
+        ID.unique(),
+        data,
+        userDocPermissions(userId, true)
+    );
 };
 
 export const authService = {
-    // 1. Password Registration
+    // 1. Password Signup
     async register({ email, password, name, avatarFile }) {
         const user = await account.create(ID.unique(), email, password, name);
         await account.createEmailPasswordSession(email, password);
@@ -35,55 +80,25 @@ export const authService = {
             await account.updatePrefs({ avatarUrl, avatarFileId: file.$id });
         }
 
-        const isAdmin = isPermittedAdmin(email);
-        try {
-            await databases.createDocument(
-                DB_ID,
-                PROFILES_COLLECTION,
-                ID.unique(),
-                {
-                    userId: user.$id,
-                    name: name || "User",
-                    email,
-                    avatarUrl,
-                    isAdmin,
-                    isBlocked: false,
-                },
-                [
-                    Permission.read(Role.any()),
-                    Permission.update(Role.user(user.$id)),
-                    Permission.delete(Role.user(user.$id)),
-                ]
-            );
-        } catch (err) {
-            console.warn("Profile document creation note:", err.message);
-        }
-
+        await syncProfileDoc({ userId: user.$id, name, email, avatarUrl }).catch(() => { });
         return user;
     },
 
-    // 2. Email / Password Login
+    // 2. Password Login
     async login(email, password) {
         const session = await account.createEmailPasswordSession(email, password);
         const user = await account.get();
+        const profile = await getProfileByUserId(user.$id);
 
-        try {
-            const profileRes = await databases.listDocuments(DB_ID, PROFILES_COLLECTION, [
-                Query.equal("userId", user.$id),
-            ]);
-            if (profileRes.documents.length > 0 && profileRes.documents[0].isBlocked) {
-                await account.deleteSession("current");
-                throw new Error("Your account has been suspended by the administrator.");
-            }
-        } catch (err) {
-            if (err.message.includes("suspended")) throw err;
+        if (profile?.isBlocked) {
+            await account.deleteSession("current");
+            throw new Error("Your account has been suspended by the administrator.");
         }
-
         return session;
     },
 
-    // 3. Google OAuth Login
-    async loginWithGoogle() {
+    // 3. OAuth & Anonymous
+    loginWithGoogle() {
         return account.createOAuth2Session(
             "google",
             `${window.location.origin}/`,
@@ -91,181 +106,123 @@ export const authService = {
         );
     },
 
-    // 4. Anonymous Guest Session
-    async loginAnonymously() {
-        return await account.createAnonymousSession();
+    loginAnonymously() {
+        return account.createAnonymousSession();
     },
 
-    // 5. Email OTP Methods
-    async sendEmailOTP(email) {
-        return await account.createEmailToken(ID.unique(), email);
+    // 4. OTP & Magic URL
+    sendEmailOTP(email) {
+        return account.createEmailToken(ID.unique(), email);
     },
 
-    async verifyEmailOTP(userId, secret) {
-        return await account.createSession(userId, secret);
+    verifyEmailOTP(userId, secret) {
+        return account.createSession(userId, secret);
     },
 
-    // 6. Magic URL Methods
-    async sendMagicURL(email) {
-        return await account.createMagicURLToken(
+    sendMagicURL(email) {
+        return account.createMagicURLToken(
             ID.unique(),
             email,
             `${window.location.origin}/verify-magic-url`
         );
     },
 
-    async verifyMagicURL(userId, secret) {
-        return await account.createSession(userId, secret);
+    verifyMagicURL(userId, secret) {
+        return account.createSession(userId, secret);
     },
 
-    // Update Display Name
+    // 5. Email Verification
+    sendEmailVerification() {
+        return account.createVerification(`${window.location.origin}/verify-email`);
+    },
+
+    confirmEmailVerification(userId, secret) {
+        return account.updateVerification(userId, secret);
+    },
+
+    // 6. Profile Management
     async updateProfileName(name) {
-        const updatedAccount = await account.updateName(name);
-        try {
-            const profileRes = await databases.listDocuments(DB_ID, PROFILES_COLLECTION, [
-                Query.equal("userId", updatedAccount.$id),
-            ]);
-            if (profileRes.documents.length > 0) {
-                await databases.updateDocument(DB_ID, PROFILES_COLLECTION, profileRes.documents[0].$id, {
-                    name,
-                });
-            }
-        } catch (err) {
-            console.warn("Name sync skipped:", err.message);
+        const updated = await account.updateName(name);
+        const profile = await getProfileByUserId(updated.$id);
+        if (profile) {
+            await databases.updateDocument(DB_ID, PROFILES_COLLECTION, profile.$id, { name }).catch(() => { });
         }
-        return updatedAccount;
+        return updated;
     },
 
-    // Set or Change Password
-    async setOrUpdatePassword(newPassword, oldPassword = "") {
-        if (oldPassword) {
-            return await account.updatePassword(newPassword, oldPassword);
-        } else {
-            return await account.updatePassword(newPassword);
-        }
+    setOrUpdatePassword(newPassword, oldPassword = "") {
+        return oldPassword
+            ? account.updatePassword(newPassword, oldPassword)
+            : account.updatePassword(newPassword);
     },
 
-    // Convert Anonymous user to permanent account
     async linkAnonymousAccount(email, password, name) {
         await account.updateEmail(email, password);
         await account.updateName(name);
-
         const user = await account.get();
-        const isAdmin = isPermittedAdmin(email);
-
-        await databases.createDocument(
-            DB_ID,
-            PROFILES_COLLECTION,
-            ID.unique(),
-            {
-                userId: user.$id,
-                name,
-                email,
-                avatarUrl: "",
-                isAdmin,
-                isBlocked: false,
-            },
-            [
-                Permission.read(Role.any()),
-                Permission.update(Role.user(user.$id)),
-                Permission.delete(Role.user(user.$id)),
-            ]
-        );
-
+        await syncProfileDoc({ userId: user.$id, name, email });
         return user;
     },
 
-    // Update Avatar
     async updateAvatar(avatarFile) {
         const user = await account.get();
         const prefs = await account.getPrefs();
 
         if (prefs.avatarFileId) {
-            try {
-                await storage.deleteFile(AVATARS_BUCKET, prefs.avatarFileId);
-            } catch (err) {
-                console.warn("Old avatar cleanup note:", err.message);
-            }
+            await storage.deleteFile(AVATARS_BUCKET, prefs.avatarFileId).catch(() => { });
         }
 
         const file = await storage.createFile(AVATARS_BUCKET, ID.unique(), avatarFile);
         const avatarUrl = storage.getFileView(AVATARS_BUCKET, file.$id);
         await account.updatePrefs({ ...prefs, avatarUrl, avatarFileId: file.$id });
 
-        try {
-            const profileRes = await databases.listDocuments(DB_ID, PROFILES_COLLECTION, [
-                Query.equal("userId", user.$id),
-            ]);
-            if (profileRes.documents.length > 0) {
-                await databases.updateDocument(DB_ID, PROFILES_COLLECTION, profileRes.documents[0].$id, {
-                    avatarUrl,
-                });
-            }
-        } catch (err) {
-            console.warn("Avatar sync skipped:", err.message);
+        const profile = await getProfileByUserId(user.$id);
+        if (profile) {
+            await databases.updateDocument(DB_ID, PROFILES_COLLECTION, profile.$id, { avatarUrl }).catch(() => { });
         }
-
         return avatarUrl;
     },
 
-    // Current Session & Profile Check
     async getCurrentUser() {
         try {
             const user = await account.get();
             const prefs = await account.getPrefs();
-
             const isAnonymous = !user.email;
             const isAdmin = isPermittedAdmin(user.email);
-            let isBlocked = false;
 
-            if (!isAnonymous) {
-                try {
-                    const profileRes = await databases.listDocuments(DB_ID, PROFILES_COLLECTION, [
-                        Query.equal("userId", user.$id),
-                    ]);
-                    if (profileRes.documents.length > 0) {
-                        isBlocked = profileRes.documents[0].isBlocked;
-                        if (isBlocked) {
-                            await account.deleteSession("current");
-                            return null;
-                        }
-                    } else {
-                        await databases.createDocument(
-                            DB_ID,
-                            PROFILES_COLLECTION,
-                            ID.unique(),
-                            {
-                                userId: user.$id,
-                                name: user.name || "User",
-                                email: user.email,
-                                avatarUrl: prefs.avatarUrl || "",
-                                isAdmin,
-                                isBlocked: false,
-                            },
-                            [
-                                Permission.read(Role.any()),
-                                Permission.update(Role.user(user.$id)),
-                                Permission.delete(Role.user(user.$id)),
-                            ]
-                        );
-                    }
-                } catch (e) {
-                    // ignore lookup errors
-                }
+            if (isAnonymous) {
+                return { ...user, ...prefs, isAdmin: false, isBlocked: false, isAnonymous: true };
             }
 
-            return { ...user, ...prefs, isAdmin, isBlocked, isAnonymous };
+            let profile = await getProfileByUserId(user.$id);
+            if (profile?.isBlocked) {
+                await account.deleteSession("current");
+                return null;
+            }
+
+            if (!profile) {
+                profile = await syncProfileDoc({
+                    userId: user.$id,
+                    name: user.name,
+                    email: user.email,
+                    avatarUrl: prefs.avatarUrl || "",
+                }).catch(() => null);
+            }
+
+            return {
+                ...user,
+                ...prefs,
+                isAdmin,
+                isBlocked: Boolean(profile?.isBlocked),
+                isAnonymous: false,
+            };
         } catch {
             return null;
         }
     },
 
-    async logout() {
-        try {
-            return await account.deleteSession("current");
-        } catch (err) {
-            console.warn("Logout error:", err);
-        }
+    logout() {
+        return account.deleteSession("current").catch(() => { });
     },
 };
 
@@ -276,14 +233,10 @@ export const mediaService = {
             IMAGES_BUCKET,
             ID.unique(),
             file,
-            [
-                Permission.read(Role.any()),
-                Permission.update(Role.user(user.$id)),
-                Permission.delete(Role.user(user.$id)),
-            ]
+            userDocPermissions(user.$id, true)
         );
 
-        return await databases.createDocument(
+        return databases.createDocument(
             DB_ID,
             IMAGES_COLLECTION,
             ID.unique(),
@@ -292,15 +245,12 @@ export const mediaService = {
                 description: description || "",
                 isPublic: Boolean(isPublic),
                 mediaType,
+                favoritesCount: 0,
                 userId: user.$id,
                 userName: user.name || "Anonymous",
                 createdAt: new Date().toISOString(),
             },
-            [
-                Permission.read(isPublic ? Role.any() : Role.user(user.$id)),
-                Permission.update(Role.user(user.$id)),
-                Permission.delete(Role.user(user.$id)),
-            ]
+            userDocPermissions(user.$id, isPublic)
         );
     },
 
@@ -308,69 +258,78 @@ export const mediaService = {
         return storage.getFileView(IMAGES_BUCKET, fileId);
     },
 
+    getMediaDownloadUrl(fileId) {
+        return storage.getFileDownload(IMAGES_BUCKET, fileId);
+    },
+
     async getFeedMedia(currentUserId) {
         try {
-            const publicDocs = await databases.listDocuments(DB_ID, IMAGES_COLLECTION, [
-                Query.equal("isPublic", true),
-                Query.orderDesc("createdAt"),
-            ]);
+            const queries = [Query.equal("isPublic", true), Query.orderDesc("createdAt")];
+            const publicDocs = await databases.listDocuments(DB_ID, IMAGES_COLLECTION, queries);
 
-            let userDocs = { documents: [] };
+            let privateDocs = [];
             if (currentUserId) {
-                try {
-                    userDocs = await databases.listDocuments(DB_ID, IMAGES_COLLECTION, [
-                        Query.equal("userId", currentUserId),
-                        Query.equal("isPublic", false),
-                        Query.orderDesc("createdAt"),
-                    ]);
-                } catch (e) {
-                    console.warn("Private media query note:", e.message);
-                }
+                const privRes = await databases.listDocuments(DB_ID, IMAGES_COLLECTION, [
+                    Query.equal("userId", currentUserId),
+                    Query.equal("isPublic", false),
+                    Query.orderDesc("createdAt"),
+                ]).catch(() => ({ documents: [] }));
+                privateDocs = privRes.documents;
             }
 
             const map = new Map();
-            [...publicDocs.documents, ...userDocs.documents].forEach((doc) =>
-                map.set(doc.$id, doc)
-            );
+            [...publicDocs.documents, ...privateDocs].forEach((doc) => map.set(doc.$id, doc));
             return Array.from(map.values());
-        } catch (err) {
-            console.warn("Feed fetch error:", err.message);
+        } catch {
             return [];
         }
     },
 
-    async getMediaById(id) {
-        return await databases.getDocument(DB_ID, IMAGES_COLLECTION, id);
+    getMediaById(id) {
+        return databases.getDocument(DB_ID, IMAGES_COLLECTION, id);
     },
 
-    async updateMedia(id, { description, isPublic }) {
-        return await databases.updateDocument(DB_ID, IMAGES_COLLECTION, id, {
+    updateMedia(id, { description, isPublic }) {
+        return databases.updateDocument(DB_ID, IMAGES_COLLECTION, id, {
             description,
             isPublic,
         });
     },
 
     async deleteMedia(id, fileId) {
-        await storage.deleteFile(IMAGES_BUCKET, fileId);
-        return await databases.deleteDocument(DB_ID, IMAGES_COLLECTION, id);
+        await storage.deleteFile(IMAGES_BUCKET, fileId).catch(() => { });
+        return databases.deleteDocument(DB_ID, IMAGES_COLLECTION, id);
     },
 
     async toggleFavorite(userId, imageId) {
         const existing = await databases.listDocuments(DB_ID, FAVORITES_COLLECTION, [
             Query.equal("userId", userId),
             Query.equal("imageId", imageId),
+            Query.limit(1),
         ]);
 
-        if (existing.total > 0) {
+        const mediaDoc = await databases.getDocument(DB_ID, IMAGES_COLLECTION, imageId);
+        const currentCount = mediaDoc.favoritesCount || 0;
+        const isFavorited = existing.total > 0;
+
+        if (isFavorited) {
             await databases.deleteDocument(DB_ID, FAVORITES_COLLECTION, existing.documents[0].$id);
-            return false;
         } else {
-            await databases.createDocument(DB_ID, FAVORITES_COLLECTION, ID.unique(), {
-                userId,
-                imageId,
-            });
-            return true;
+            await databases.createDocument(
+                DB_ID,
+                FAVORITES_COLLECTION,
+                ID.unique(),
+                { userId, imageId },
+                userDocPermissions(userId, true)
+            );
         }
+
+        const updatedCount = Math.max(0, isFavorited ? currentCount - 1 : currentCount + 1);
+        await databases.updateDocument(DB_ID, IMAGES_COLLECTION, imageId, {
+            favoritesCount: updatedCount,
+        });
+
+        return { isFavorited: !isFavorited, newCount: updatedCount };
     },
 
     async getUserFavorites(userId) {
@@ -380,12 +339,12 @@ export const mediaService = {
                 Query.equal("userId", userId),
             ]);
             const imageIds = favs.documents.map((d) => d.imageId);
-            if (imageIds.length === 0) return { documents: [] };
+            if (!imageIds.length) return { documents: [] };
 
             return await databases.listDocuments(DB_ID, IMAGES_COLLECTION, [
                 Query.equal("$id", imageIds),
             ]);
-        } catch (err) {
+        } catch {
             return { documents: [] };
         }
     },
@@ -396,6 +355,7 @@ export const mediaService = {
             const existing = await databases.listDocuments(DB_ID, FAVORITES_COLLECTION, [
                 Query.equal("userId", userId),
                 Query.equal("imageId", imageId),
+                Query.limit(1),
             ]);
             return existing.total > 0;
         } catch {
@@ -412,8 +372,8 @@ export const adminService = {
         return res.documents;
     },
 
-    async toggleBlockUser(documentId, isBlocked) {
-        return await databases.updateDocument(DB_ID, PROFILES_COLLECTION, documentId, {
+    toggleBlockUser(documentId, isBlocked) {
+        return databases.updateDocument(DB_ID, PROFILES_COLLECTION, documentId, {
             isBlocked,
         });
     },
